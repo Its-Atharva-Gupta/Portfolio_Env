@@ -1,0 +1,47 @@
+name: portfolio-management
+version: "1.0.0"
+description: >
+  A reinforcement learning environment for AI portfolio management.
+  Agent trades Reliance Industries stock using 10 years of historical OHLCV data
+  with professional technical indicators (RSI, MACD, Golden/Death Cross).
+  Three task levels with separate graders: calm market, full market, volatile market with shocks.
+author: "Atharva Gupta"
+tags:
+  - finance
+  - trading
+  - portfolio-management
+  - real-world
+  - technical-analysis
+  - rl
+  - llm-agents
+
+tasks:
+  - id: 1
+    name: "Calm Market"
+    difficulty: easy
+    episode_length: 63
+    metrics: [beat_buy_hold, max_drawdown, beat_fixed_deposit]
+    success_threshold: 0.3
+  - id: 2
+    name: "Full Market"
+    difficulty: medium
+    episode_length: 126
+    metrics: [beat_buy_hold, beat_momentum, sharpe_ratio, max_drawdown, beat_fixed_deposit]
+    success_threshold: 0.5
+  - id: 3
+    name: "Volatile Market with Shocks"
+    difficulty: hard
+    episode_length: 252
+    metrics: [beat_buy_hold, beat_momentum, sharpe_ratio, max_drawdown, beat_fixed_deposit]
+    success_threshold: 0.6
+
+action_space:
+  type: discrete
+  n: 3
+  labels: ["hold", "buy_all", "sell_all"]
+
+observation_space:
+  type: mixed
+  components:
+    - numeric: 23 float fields (prices, indicators, portfolio state)
+    - text: text_observation for LLM agents

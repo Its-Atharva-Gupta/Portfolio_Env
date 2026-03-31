@@ -1,0 +1,19 @@
+Metadata-Version: 2.4
+Name: portfolio
+Version: 0.1.0
+Summary: Portfolio Management RL Environment - Trade Reliance Industries stock using technical indicators
+Requires-Python: >=3.10
+Requires-Dist: numpy>=1.24.0
+Requires-Dist: pandas>=2.0.0
+Requires-Dist: yfinance>=0.2.32
+Requires-Dist: pydantic>=2.0.0
+Requires-Dist: fastapi>=0.104.0
+Requires-Dist: uvicorn[standard]>=0.24.0
+Requires-Dist: stable-baselines3>=2.2.0
+Requires-Dist: gymnasium>=0.29.0
+Requires-Dist: openai>=1.3.0
+Requires-Dist: groq>=0.4.0
+Requires-Dist: aiohttp>=3.9.0
+Requires-Dist: openenv>=0.1.13
+Requires-Dist: openenv-core>=0.2.2
+Requires-Dist: requests>=2.31.0
