@@ -30,13 +30,8 @@ app = create_app(
 
 # ── Separate env instances for custom endpoints ───────────────
 # create_app manages its own instances internally.
-# We maintain our own for /grader and /baseline.
-_envs = {
-    1: PortfolioEnvironment(task_level=1),
-    2: PortfolioEnvironment(task_level=2),
-    3: PortfolioEnvironment(task_level=3),
-}
-_current_task = 1
+# The /grader endpoint uses _active_instance set in PortfolioEnvironment.reset()
+# (We don't pre-create _envs here to avoid loading data at module init time)
 
 
 # ── Custom endpoints ──────────────────────────────────────────
@@ -44,10 +39,27 @@ _current_task = 1
 # DO NOT redefine: /reset /step /state /schema /health /metadata /ws /mcp
 
 @app.get("/grader")
-async def get_grader():
-    """Get grader score for the current episode"""
-    score = grade_episode(_envs[_current_task].game)
-    return score
+def get_grader():
+    """Get grader score for the current episode."""
+    try:
+        if PortfolioEnvironment._active_instance is None:
+            return {
+                "final_score": 0.0,
+                "agent_return": 0.0,
+                "bh_return": 0.0,
+                "max_drawdown": 0.0,
+            }
+
+        score = grade_episode(PortfolioEnvironment._active_instance.game)
+        return score
+    except Exception as e:
+        return {
+            "final_score": 0.0,
+            "agent_return": 0.0,
+            "bh_return": 0.0,
+            "max_drawdown": 0.0,
+            "pass": False,
+        }
 
 
 @app.get("/tasks")
@@ -102,13 +114,14 @@ async def baseline():
     Deterministic and reproducible — no API key required.
     Buy when RSI < 30 (oversold), sell when RSI > 70 (overbought), else hold.
     """
-    global _current_task
+    from .env import PortfolioEnv
+
     results = {}
 
     for task_level in [1, 2, 3]:
-        _current_task = task_level
-        env = _envs[task_level]
-        obs, _ = env.game.reset()
+        # Create a fresh environment for this task
+        env_game = PortfolioEnv(task_level=task_level, seed=42)
+        obs, _ = env_game.reset()
         done = False
 
         while not done:
@@ -120,9 +133,9 @@ async def baseline():
             else:
                 action = 0   # neutral → hold
 
-            obs, _, done, _ = env.game.step(action)
+            obs, _, done, _ = env_game.step(action)
 
-        score = grade_episode(env.game)
+        score = grade_episode(env_game)
         results[f"task_{task_level}"] = {
             "final_score":  score["final_score"],
             "agent_return": score["agent_return"],

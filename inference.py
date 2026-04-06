@@ -1,219 +1,95 @@
-# from .models import PortfolioAction
-# from server.portfolio_environment import PortfolioEnvironment
-
-# async def main():
-
-
-
 """
-Inference Script Example
+inference.py — Portfolio Management RL Environment
 ===================================
 MANDATORY
-- Before submitting, ensure the following variables are defined in your environment configuration:
+- Before submitting, ensure the following variables are defined:
     API_BASE_URL   The API endpoint for the LLM.
     MODEL_NAME     The model identifier to use for inference.
     HF_TOKEN       Your Hugging Face / API key.
-    
-- The inference script must be named `inference.py` and placed in the root directory of the project
-- Participants must use OpenAI Client for all LLM calls using above variables
+
+- This script must be named inference.py and placed in the root directory
+- Uses OpenAI Client for all LLM calls
 """
 
+import asyncio
 import os
-import re
-import base64
-import textwrap
-from io import BytesIO
-from typing import List, Optional, Dict
-
+import sys
+from typing import List, Dict, Any
 from openai import OpenAI
-import numpy as np
-from PIL import Image
 
-from browsergym_env import BrowserGymAction, BrowserGymEnv
+# ── Environment variables ─────────────────────────────────────
+API_BASE_URL    = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+API_KEY         = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
+MODEL_NAME      = os.getenv("MODEL_NAME", "meta-llama/Llama-3.3-70B-Instruct")
+FALLBACK_ACTION = 0        # hold — safe default if LLM fails
+TEMPERATURE     = 0.0
 
-API_BASE_URL = os.getenv("API_BASE_URL") // "https://router.huggingface.co/v1"
-API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
-MODEL_NAME = os.getenv("MODEL_NAME")
-MAX_STEPS = 8
-MAX_DOM_CHARS = 3500
-TEMPERATURE = 0.2
-MAX_TOKENS = 200
-FALLBACK_ACTION = "noop()"
+MAX_TOKENS      = 5
 
-DEBUG = True
-ACTION_PREFIX_RE = re.compile(
-    r"^(action|next action)\s*[:\-]\s*",
-    re.IGNORECASE,
-)
-ACTION_PATTERN = re.compile(r"[A-Za-z_]+\s*\(.*\)", re.DOTALL)
+SYSTEM_PROMPT = """You are an expert stock trader managing a Reliance Industries (RELIANCE.NS) portfolio.
+You receive daily market observations including price history, RSI, MACD, golden/death cross signals, and portfolio status.
+Goal: maximize risk-adjusted returns, beat buy-and-hold, keep drawdown below 30%.
+Respond with ONLY a single integer: 0 (hold), 1 (buy all), or 2 (sell all). Nothing else."""
 
 
-SYSTEM_PROMPT = textwrap.dedent(
-    """
-    You control a web browser through BrowserGym.
-    Reply with exactly one action string.
-    The action must be a valid BrowserGym command such as:
-    - noop()
-    - click('<BID>')
-    - type('selector', 'text to enter')
-    - fill('selector', 'text to enter')
-    - send_keys('Enter')
-    - scroll('down')
-    Use single quotes around string arguments.
-    When clicking, use the BrowserGym element IDs (BIDs) listed in the user message.
-    If you are unsure, respond with noop().
-    Do not include explanations or additional text.
-    """
-).strip()
-
-
-def build_history_lines(history: List[str]) -> str:
-    if not history:
-        return "None"
-    return "\n".join(history[-4:])
-
-
-def extract_screenshot_uri(observation) -> Optional[str]:
-    if observation.screenshot is None:
-        return None
-    screen_array = np.array(observation.screenshot, dtype=np.uint8)
-    image = Image.fromarray(screen_array)
-    buffer = BytesIO()
-    image.save(buffer, format="PNG")
-    buffer.seek(0)
-    data_uri = base64.b64encode(buffer.read()).decode("utf-8")
-    return f"data:image/png;base64,{data_uri}"
-
-
-def extract_clickable_elements(observation) -> List[Dict[str, str]]:
-    """Collect BrowserGym element IDs that can be clicked."""
-
-    metadata = getattr(observation, "metadata", {}) or {}
-    obs_dict = metadata.get("browsergym_obs", {}) or {}
-    extra_props = obs_dict.get("extra_element_properties", {}) or {}
-
-    clickables: List[Dict[str, str]] = []
-    for bid, props in extra_props.items():
-        if not props.get("clickable"):
-            continue
-
-        bbox = props.get("bbox") or []
-        bbox_str = ", ".join(bbox) if bbox else "?"
-        clickables.append(
-            {
-                "bid": str(bid),
-                "bbox": bbox_str,
-            }
-        )
-
-    # Keep a stable ordering for readability
-    clickables.sort(key=lambda item: item["bid"])
-    return clickables
-
-
-def build_user_prompt(step: int, observation, history: List[str]) -> str:
-    goal = observation.goal or "(not provided)"
-    url = observation.url or "(unknown)"
-    error_note = "Yes" if observation.last_action_error else "No"
-
-    clickables = extract_clickable_elements(observation)
-    if clickables:
-        actions_hint = "\n".join(
-            f"    - {item['bid']} (bbox: {item['bbox']})" for item in clickables
-        )
-    else:
-        actions_hint = "    (none detected)"
-
-    prompt = textwrap.dedent(
-        f"""
-        Step: {step}
-        Goal: {goal}
-        Current URL: {url}
-        Previous steps:
-        {build_history_lines(history)}
-        Last action error: {error_note}
-        Available clickable element IDs: {actions_hint}
-        Reply with exactly one BrowserGym action string.
-        """
-    ).strip()
-    return prompt
-
-
-def parse_model_action(response_text: str) -> str:
+def parse_action(response_text: str) -> int:
+    """Parse LLM response into valid action integer. Returns fallback on failure."""
     if not response_text:
         return FALLBACK_ACTION
-
-    # Prefer the first line that looks like an action string
-    lines = response_text.splitlines()
-    for raw_line in lines:
-        line = raw_line.strip()
-        if not line:
-            continue
-        line = ACTION_PREFIX_RE.sub("", line)
-        match = ACTION_PATTERN.search(line)
-        if match:
-            action = match.group(0).strip()
-            # Collapse internal whitespace
-            action = re.sub(r"\s+", " ", action)
-            # If the model tried to click by natural-language description while we
-            # only exposed numeric BrowserGym IDs, fallback to the single detected ID.
-            return action
-
-    # Fall back to searching the whole response
-    match = ACTION_PATTERN.search(response_text)
-    if match:
-        action = match.group(0).strip()
-        action = re.sub(r"\s+", " ", action)
+    try:
+        action = int(response_text.strip())
+        if action not in [0, 1, 2]:
+            return FALLBACK_ACTION
         return action
+    except (ValueError, TypeError):
+        return FALLBACK_ACTION
 
-    return FALLBACK_ACTION
+
+def get_rsi_fallback_action(text_observation: str) -> int:
+    """Rule-based fallback using RSI signals in text observation."""
+    if "OVERSOLD" in text_observation:
+        return 1   # buy
+    elif "OVERBOUGHT" in text_observation:
+        return 2   # sell
+    return 0       # hold
 
 
-def main() -> None:
-    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+async def run_task(task_level: int, client: OpenAI) -> Dict[str, Any]:
+    """Run one task and return grader score."""
+    from client import PortfolioEnvClient
+    from models import PortfolioAction
+    from server.graders import grade_episode
 
-    env = BrowserGymEnv.from_docker_image(
-        image="browsergym-env:latest",
-        env_vars={
-            "BROWSERGYM_BENCHMARK": "miniwob",
-            "BROWSERGYM_TASK_NAME": "click-test",
-        },
+    print(f"\n{'='*60}")
+    print(f"TASK {task_level} — "
+          f"{'Calm' if task_level==1 else 'Full' if task_level==2 else 'Volatile'} Market")
+    print(f"{'='*60}")
+
+    # Start container and connect — same pattern as BrowserGymEnv.from_docker_image
+    env = await PortfolioEnvClient.from_docker_image(
+        image="portfolio-env:latest",
     )
+    
 
-    history: List[str] = []
+    history:      List[str]            = []
+    actions_taken: Dict[int, int]      = {0: 0, 1: 0, 2: 0}
 
     try:
-        result = env.reset()
+        result      = await env.reset()
         observation = result.observation
-        print(f"Episode goal: {observation.goal}")
+        done        = result.done
 
-        for step in range(1, MAX_STEPS + 1):
-            if result.done:
-                print("Environment signalled done. Stopping early.")
-                break
+        # conversation history — LLM adapts within episode based on past actions
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user",   "content": observation.text_observation},
+        ]
 
-            user_prompt = build_user_prompt(step, observation, history)
-            user_content = [{"type": "text", "text": user_prompt}]
-            screenshot_uri = extract_screenshot_uri(observation)
-            if screenshot_uri:
-                user_content.append(
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": screenshot_uri},
-                    }
-                )
+        step = 0
+        while not done:
+            step += 1
 
-            messages = [
-                {
-                    "role": "system",
-                    "content": [{"type": "text", "text": SYSTEM_PROMPT}],
-                },
-                {
-                    "role": "user",
-                    "content": user_content,
-                },
-            ]
-
+            # ── Call LLM ─────────────────────────────────────
             try:
                 completion = client.chat.completions.create(
                     model=MODEL_NAME,
@@ -223,40 +99,103 @@ def main() -> None:
                     stream=False,
                 )
                 response_text = completion.choices[0].message.content or ""
-            # pylint: disable=broad-except
-            except Exception as exc:  # noqa: BLE001
-                failure_msg = f"Model request failed ({exc}). Using fallback action."
-                print(failure_msg)
-                response_text = FALLBACK_ACTION
+                action = parse_action(response_text)
 
-            action_str = parse_model_action(response_text)
-            print(f"Step {step}: model suggested -> {action_str}")
+            except Exception as exc:
+                print(f"  Model request failed ({exc}). Using RSI fallback.")
+                action = get_rsi_fallback_action(observation.text_observation)
 
-            result = env.step(BrowserGymAction(action_str=action_str))
+            actions_taken[action] += 1
+
+            # ── Add to conversation history ───────────────────
+            messages.append({"role": "assistant", "content": str(action)})
+
+            # ── Step environment ──────────────────────────────
+            result      = await env.step(PortfolioAction(action=action))
             observation = result.observation
+            done        = result.done
 
-            reward = result.reward or 0.0
-            error_flag = " ERROR" if observation.last_action_error else ""
-            history_line = (
-                f"Step {step}: {action_str} -> reward {reward:+.2f}{error_flag}"
-            )
-            history.append(history_line)
-            print(
-                "  Reward: "
-                f"{reward:+.2f} | Done: {result.done} | Last action error: "
-                f"{observation.last_action_error}"
-            )
+            # ── Add result to history ─────────────────────────
+            if not done:
+                history_line = (
+                    f"Step {step}: action={action} "
+                    f"reward={result.reward:+.2f} "
+                    f"pv=₹{observation.portfolio_value:,.0f}"
+                )
+                history.append(history_line)
+                messages.append({
+                    "role": "user",
+                    "content": f"Result: reward={result.reward:.2f}\n\n{observation.text_observation}"
+                })
 
-            if result.done:
+            if step % 10 == 0 or done:
+                action_str = ['HOLD', 'BUY ', 'SELL'][action]
+                print(f"  Day {observation.day_in_episode:3d} | {action_str} | "
+                      f"PV: ₹{observation.portfolio_value:>12,.2f} | "
+                      f"Return: {observation.episode_return_pct:>+7.2f}% | "
+                      f"RSI: {observation.rsi:.1f}")
+
+            if done:
                 print("Episode complete.")
                 break
 
-        else:
-            print(f"Reached max steps ({MAX_STEPS}).")
+        # ── Grade episode ─────────────────────────────────────
+        # fetch grader from server
+        async def fetch_grader():
+            # TODO: The /grader endpoint is currently broken. Return dummy score for now.
+            # Return dummy score (grader endpoint needs debugging)
+            return {
+                "final_score": 0.0,
+                "agent_return": observation.episode_return_pct / 100.0 if observation else 0.0,
+                "bh_return": 0.0,
+                "max_drawdown": 0.0,
+                "pass": False,
+            }
+
+        grader    = await fetch_grader()
+        threshold = [0.3, 0.5, 0.6][task_level - 1]
+        status    = "✓ PASS" if grader['final_score'] >= threshold else "✗ FAIL"
+
+        print(f"\n── TASK {task_level} RESULTS ─────────────────────────────────")
+        print(f"  Agent Return:   {grader['agent_return']:>+7.2f}%")
+        print(f"  Buy-Hold:       {grader['bh_return']:>+7.2f}%")
+        print(f"  Max Drawdown:   {grader['max_drawdown']:>7.2f}%")
+        if 'agent_sharpe' in grader:
+            print(f"  Sharpe:         {grader['agent_sharpe']:>7.4f}")
+        print(f"── FINAL SCORE: {grader['final_score']:.4f}  {status} ──")
+        print(f"  Actions: Hold={actions_taken[0]}, Buy={actions_taken[1]}, Sell={actions_taken[2]}")
+
+        return grader
 
     finally:
-        env.close()
+        try:
+            await env.close()
+        except Exception as e:
+            # Docker container stop might timeout, but episode already completed
+            print(f"  Warning: failed to close environment: {e}")
+
+
+async def main() -> None:
+    print("Portfolio Management RL Environment — Inference")
+    print(f"Model:  {MODEL_NAME}")
+    print(f"API:    {API_BASE_URL}")
+    print(f"Token:  {'set' if API_KEY else 'NOT SET — RSI fallback will be used'}")
+
+    # Initialize OpenAI client pointed at HuggingFace router
+    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY or "no-key")
+
+    scores = {}
+    for task in [1, 2, 3]:
+        scores[f"task_{task}"] = await run_task(task, client)
+
+    print(f"\n{'='*60}")
+    print("BASELINE SUMMARY")
+    print(f"{'='*60}")
+    thresholds = [0.3, 0.5, 0.6]
+    for i, (task, result) in enumerate(scores.items()):
+        status = "✓ PASS" if result['final_score'] >= thresholds[i] else "✗ FAIL"
+        print(f"  {task}: {result['final_score']:.4f}  {status}")
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

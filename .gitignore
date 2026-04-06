@@ -2,3 +2,6 @@
 __pycache__/
 Trading_Env.zip
 script.sh
+.env
+groq_inference.py
+CLAUDE.md

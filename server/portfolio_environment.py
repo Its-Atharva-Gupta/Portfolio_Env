@@ -21,17 +21,20 @@ class PortfolioEnvironment(Environment):
     """OpenEnv-compatible Portfolio Environment wrapper"""
 
     SUPPORTS_CONCURRENT_SESSIONS = True
+    _active_instance = None  # Class variable to track current instance for grading
 
     def __init__(self, task_level: int = 1):
         """Initialize environment"""
         self.game = PortfolioEnv(task_level=task_level, seed=42)
         self._state  = State(episode_id=str(uuid4()), step_count=0)
+        self.task_level = task_level
 
 
     def reset(self) -> PortfolioObservation:
         """Reset environment and return initial observation"""
         self._state = State(episode_id=str(uuid4()), step_count=0)
         obs, info = self.game.reset()
+        PortfolioEnvironment._active_instance = self  # Track this instance for grading
         return self._build_observation(obs, reward=0.0, done=False)
 
     def step(self, action: PortfolioAction) -> PortfolioObservation:
