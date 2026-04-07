@@ -37,3 +37,4 @@ script.sh
 groq_inference.py
 Trading_Env.zip
 CLAUDE.md
+validation.sh

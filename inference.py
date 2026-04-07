@@ -41,7 +41,9 @@ HF_TOKEN = os.getenv("HF_TOKEN")  # No default — must be provided
 ENV_URL = os.getenv("ENV_URL", "http://localhost:8000")
 
 # If you are using docker image
+# Support both naming conventions: IMAGE_NAME (sample.py) and LOCAL_IMAGE_NAME (final.md)
 IMAGE_NAME = os.getenv("IMAGE_NAME")
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 
 FALLBACK_ACTION = 0  # hold — safe default if LLM fails
 TEMPERATURE = 0.0
@@ -123,13 +125,14 @@ def get_env_client():
     except Exception:
         pass
 
-    # Fallback: try to launch from Docker image (if IMAGE_NAME env var is set)
-    if IMAGE_NAME:
+    # Fallback: try to launch from Docker image (if IMAGE_NAME or LOCAL_IMAGE_NAME env var is set)
+    docker_image = IMAGE_NAME or LOCAL_IMAGE_NAME
+    if docker_image:
         try:
-            env = PortfolioEnvClient.from_docker_image(IMAGE_NAME)
+            env = PortfolioEnvClient.from_docker_image(docker_image)
             return env.sync()
         except Exception as exc:
-            error_msg = f"Failed to launch Docker image '{IMAGE_NAME}': {exc}"
+            error_msg = f"Failed to launch Docker image '{docker_image}': {exc}"
             print(f"[ERROR] {error_msg}", flush=True)
             raise RuntimeError(error_msg) from exc
 
