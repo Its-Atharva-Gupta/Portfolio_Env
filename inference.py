@@ -113,15 +113,15 @@ def get_action_label(action: int) -> str:
     return ACTION_LABELS.get(action, f"unknown({action})")
 
 
-def get_env_client():
-    """Connect to the environment server. Returns a sync client.
+async def get_env_client():
+    """Connect to the environment server. Returns an async client.
     Tries ENV_URL first, then Docker image if available."""
     # Try connecting to already-running server
     try:
         resp = requests.get(f"{ENV_URL}/health", timeout=5)
         if resp.status_code == 200:
             env = PortfolioEnvClient(base_url=ENV_URL)
-            return env.sync()
+            return env
     except Exception:
         pass
 
@@ -129,8 +129,8 @@ def get_env_client():
     docker_image = IMAGE_NAME or LOCAL_IMAGE_NAME
     if docker_image:
         try:
-            env = PortfolioEnvClient.from_docker_image(docker_image)
-            return env.sync()
+            env = await PortfolioEnvClient.from_docker_image(docker_image)
+            return env
         except Exception as exc:
             error_msg = f"Failed to launch Docker image '{docker_image}': {exc}"
             print(f"[ERROR] {error_msg}", flush=True)
@@ -154,7 +154,7 @@ def fetch_grader_score(env_url: str) -> Dict[str, Any]:
 
 # ── Run one task ──────────────────────────────────────────────
 
-def run_task(task_level: int, llm_client: OpenAI, env: PortfolioEnvClient) -> Dict[str, Any]:
+async def run_task(task_level: int, llm_client: OpenAI, env: PortfolioEnvClient) -> Dict[str, Any]:
     """Run one task, emit structured logs, return grader score."""
     # Safe lookup of task name
     task_name = TASK_NAMES.get(task_level, f"unknown-task-{task_level}")
@@ -171,7 +171,7 @@ def run_task(task_level: int, llm_client: OpenAI, env: PortfolioEnvClient) -> Di
     try:
         # Reset environment for this task via WebSocket
         try:
-            result = env.reset(task_level=task_level)
+            result = await env.reset(task_level=task_level)
         except Exception as exc:
             error_msg = f"Failed to reset environment: {exc}"
             print(f"[ERROR] {error_msg}", flush=True)
@@ -225,7 +225,7 @@ def run_task(task_level: int, llm_client: OpenAI, env: PortfolioEnvClient) -> Di
 
             # Step environment via WebSocket
             try:
-                result = env.step(PortfolioAction(action=action))
+                result = await env.step(PortfolioAction(action=action))
             except Exception as exc:
                 error_msg = str(exc)
                 log_step(
@@ -327,16 +327,16 @@ async def main() -> None:
         llm_client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN or "no-key")
 
         # Connect to the environment server (WebSocket for stateful interaction)
-        env = get_env_client()
+        env = await get_env_client()
 
         results = []
         try:
             for task_level in [1, 2, 3]:
-                result = run_task(task_level, llm_client, env)
+                result = await run_task(task_level, llm_client, env)
                 results.append(result)
         finally:
             try:
-                env.close()
+                await env.close()
             except Exception:
                 pass
 
