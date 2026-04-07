@@ -6,10 +6,14 @@ from .env import PortfolioEnv
 
 
 def _score_component(agent_val: float, benchmark_val: float) -> float:
-    """Score agent performance vs a benchmark. Returns 0.0–1.0"""
+    """Score agent performance vs a benchmark. Returns (0, 1) strictly."""
+    epsilon = 1e-6
     if benchmark_val <= 0:
-        return 1.0 if agent_val > benchmark_val else max(0.0, 1.0 + agent_val)
-    return max(0.0, min(1.0, agent_val / benchmark_val))
+        score = 1.0 if agent_val > benchmark_val else max(0.0, 1.0 + agent_val)
+    else:
+        score = max(0.0, min(1.0, agent_val / benchmark_val))
+    # Clamp to strictly (0, 1)
+    return max(epsilon, min(1.0 - epsilon, score))
 
 
 def grade_task_1(env: PortfolioEnv) -> Dict[str, Any]:
@@ -20,8 +24,9 @@ def grade_task_1(env: PortfolioEnv) -> Dict[str, Any]:
     """
     m = env._compute_episode_score()
 
+    epsilon = 1e-6
     bh_score = _score_component(m['agent_return'], m['bh_return'])
-    dd_score = max(0.0, min(1.0, 1.0 - (m['max_drawdown'] / 0.30)))
+    dd_score = max(epsilon, min(1.0 - epsilon, max(0.0, min(1.0, 1.0 - (m['max_drawdown'] / 0.30)))))
     fd_score = _score_component(m['agent_return'], m['fd_return'])
 
     final_score = (
@@ -29,6 +34,8 @@ def grade_task_1(env: PortfolioEnv) -> Dict[str, Any]:
         0.30 * dd_score +
         0.30 * fd_score
     )
+    # Clamp final_score to strictly (0, 1)
+    final_score = max(epsilon, min(1.0 - epsilon, final_score))
 
     return {
         'task': 1,
@@ -52,15 +59,17 @@ def grade_task_2(env: PortfolioEnv) -> Dict[str, Any]:
     """
     m = env._compute_episode_score()
 
+    epsilon = 1e-6
     bh_score = _score_component(m['agent_return'], m['bh_return'])
     mom_score = _score_component(m['agent_return'], m['momentum_return'])
-    
+
     if m['precomputed_sharpe'] > 0:
         sharpe_score = max(0.0, min(1.0, m['agent_sharpe'] / m['precomputed_sharpe']))
     else:
         sharpe_score = 1.0 if m['agent_sharpe'] > 0 else 0.0
-    
-    dd_score = max(0.0, min(1.0, 1.0 - (m['max_drawdown'] / 0.30)))
+    sharpe_score = max(epsilon, min(1.0 - epsilon, sharpe_score))
+
+    dd_score = max(epsilon, min(1.0 - epsilon, max(0.0, min(1.0, 1.0 - (m['max_drawdown'] / 0.30)))))
     fd_score = _score_component(m['agent_return'], m['fd_return'])
 
     final_score = (
@@ -70,6 +79,8 @@ def grade_task_2(env: PortfolioEnv) -> Dict[str, Any]:
         0.15 * dd_score +
         0.15 * fd_score
     )
+    # Clamp final_score to strictly (0, 1)
+    final_score = max(epsilon, min(1.0 - epsilon, final_score))
 
     return {
         'task': 2,
@@ -98,15 +109,17 @@ def grade_task_3(env: PortfolioEnv) -> Dict[str, Any]:
     """
     m = env._compute_episode_score()
 
+    epsilon = 1e-6
     bh_score = _score_component(m['agent_return'], m['bh_return'])
     mom_score = _score_component(m['agent_return'], m['momentum_return'])
-    
+
     if m['precomputed_sharpe'] > 0:
         sharpe_score = max(0.0, min(1.0, m['agent_sharpe'] / m['precomputed_sharpe']))
     else:
         sharpe_score = 1.0 if m['agent_sharpe'] > 0 else 0.0
-    
-    dd_score = max(0.0, min(1.0, 1.0 - (m['max_drawdown'] / 0.30)))
+    sharpe_score = max(epsilon, min(1.0 - epsilon, sharpe_score))
+
+    dd_score = max(epsilon, min(1.0 - epsilon, max(0.0, min(1.0, 1.0 - (m['max_drawdown'] / 0.30)))))
     fd_score = _score_component(m['agent_return'], m['fd_return'])
 
     final_score = (
@@ -120,6 +133,9 @@ def grade_task_3(env: PortfolioEnv) -> Dict[str, Any]:
     # Hard cap: catastrophic drawdown disqualifies regardless of returns
     if m['max_drawdown'] > 0.30:
         final_score = min(final_score, 0.4)
+
+    # Clamp final_score to strictly (0, 1)
+    final_score = max(epsilon, min(1.0 - epsilon, final_score))
 
     return {
         'task': 3,
@@ -238,7 +254,7 @@ def test_rolling_benchmark_no_lookahead():
 
 
 def test_grader_scores_in_range():
-    """Test grader scores are in [0, 1]"""
+    """Test grader scores are strictly in (0, 1)"""
     for task in [1, 2, 3]:
         env = PortfolioEnv(task_level=task, seed=42)
         env.reset()
@@ -246,8 +262,8 @@ def test_grader_scores_in_range():
         while not done:
             _, _, done, _ = env.step(0)
         result = grade_episode(env)
-        assert 0.0 <= result['final_score'] <= 1.0, \
-            f"Task {task}: score {result['final_score']} out of range"
+        assert 0.0 < result['final_score'] < 1.0, \
+            f"Task {task}: score {result['final_score']} not strictly in (0, 1)"
         print(f"✓ test_grader_scores_in_range passed for task {task} (score={result['final_score']:.4f})")
 
 
