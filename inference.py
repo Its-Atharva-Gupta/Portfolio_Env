@@ -9,36 +9,85 @@ MANDATORY
 
 - This script must be named inference.py and placed in the root directory
 - Uses OpenAI Client for all LLM calls
+
+STDOUT FORMAT
+- The script emits exactly three line types to stdout:
+    [START] task=<task_name> env=<benchmark> model=<model_name>
+    [STEP]  step=<n> action=<action_str> reward=<0.00> done=<true|false> error=<msg|null>
+    [END]   success=<true|false> steps=<n> score=<score> rewards=<r1,r2,...,rn>
 """
 
 import asyncio
 import os
 import sys
-from typing import List, Dict, Any
+from typing import List, Optional, Dict, Any
+from pathlib import Path
+
+import requests
 from openai import OpenAI
+from dotenv import load_dotenv
+from client import PortfolioEnvClient
+from models import PortfolioAction
+
+# ── Load environment variables from .env ──────────────────────
+load_dotenv()
 
 # ── Environment variables ─────────────────────────────────────
-API_BASE_URL    = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-API_KEY         = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
-MODEL_NAME      = os.getenv("MODEL_NAME", "meta-llama/Llama-3.3-70B-Instruct")
-FALLBACK_ACTION = 0        # hold — safe default if LLM fails
-TEMPERATURE     = 0.0
+API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+MODEL_NAME = os.getenv("MODEL_NAME", "meta-llama/Llama-3.3-70B-Instruct")
+HF_TOKEN = os.getenv("HF_TOKEN")  # No default — must be provided
 
-MAX_TOKENS      = 5
+# Environment server URL — the already-running HF Space or local server
+ENV_URL = os.getenv("ENV_URL", "http://localhost:8000")
+
+# If you are using docker image
+IMAGE_NAME = os.getenv("IMAGE_NAME")
+
+FALLBACK_ACTION = 0  # hold — safe default if LLM fails
+TEMPERATURE = 0.0
+MAX_TOKENS = 5
+BENCHMARK_NAME = "portfolio"
 
 SYSTEM_PROMPT = """You are an expert stock trader managing a Reliance Industries (RELIANCE.NS) portfolio.
 You receive daily market observations including price history, RSI, MACD, golden/death cross signals, and portfolio status.
 Goal: maximize risk-adjusted returns, beat buy-and-hold, keep drawdown below 30%.
 Respond with ONLY a single integer: 0 (hold), 1 (buy all), or 2 (sell all). Nothing else."""
 
+TASK_NAMES = {1: "calm-market", 2: "full-market", 3: "volatile-market"}
+
+
+# ── Structured logging ────────────────────────────────────────
+
+def log_start(task: str, env: str, model: str) -> None:
+    print(f"[START] task={task} env={env} model={model}", flush=True)
+
+
+def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
+    error_val = error if error else "null"
+    done_val = str(done).lower()
+    print(
+        f"[STEP] step={step} action={action} reward={reward:.2f} done={done_val} error={error_val}",
+        flush=True,
+    )
+
+
+def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    print(
+        f"[END] success={str(success).lower()} steps={steps} score={score:.2f} rewards={rewards_str}",
+        flush=True,
+    )
+
+
+# ── Helpers ───────────────────────────────────────────────────
 
 def parse_action(response_text: str) -> int:
-    """Parse LLM response into valid action integer. Returns fallback on failure."""
+    """Parse LLM response into valid action integer."""
     if not response_text:
         return FALLBACK_ACTION
     try:
         action = int(response_text.strip())
-        if action not in [0, 1, 2]:
+        if action not in (0, 1, 2):
             return FALLBACK_ACTION
         return action
     except (ValueError, TypeError):
@@ -48,153 +97,248 @@ def parse_action(response_text: str) -> int:
 def get_rsi_fallback_action(text_observation: str) -> int:
     """Rule-based fallback using RSI signals in text observation."""
     if "OVERSOLD" in text_observation:
-        return 1   # buy
+        return 1
     elif "OVERBOUGHT" in text_observation:
-        return 2   # sell
-    return 0       # hold
+        return 2
+    return 0
 
 
-async def run_task(task_level: int, client: OpenAI) -> Dict[str, Any]:
-    """Run one task and return grader score."""
-    from client import PortfolioEnvClient
-    from models import PortfolioAction
-    from server.graders import grade_episode
+ACTION_LABELS = {0: "hold", 1: "buy", 2: "sell"}
 
-    print(f"\n{'='*60}")
-    print(f"TASK {task_level} — "
-          f"{'Calm' if task_level==1 else 'Full' if task_level==2 else 'Volatile'} Market")
-    print(f"{'='*60}")
 
-    # Start container and connect — same pattern as BrowserGymEnv.from_docker_image
-    env = await PortfolioEnvClient.from_docker_image(
-        image="portfolio-env:latest",
-    )
-    
+def get_action_label(action: int) -> str:
+    """Safely get action label, default to 'unknown' if not found."""
+    return ACTION_LABELS.get(action, f"unknown({action})")
 
-    history:      List[str]            = []
-    actions_taken: Dict[int, int]      = {0: 0, 1: 0, 2: 0}
+
+def get_env_client():
+    """Connect to the environment server. Returns a sync client.
+    Tries ENV_URL first, then Docker image if available."""
+    # Try connecting to already-running server
+    try:
+        resp = requests.get(f"{ENV_URL}/health", timeout=5)
+        if resp.status_code == 200:
+            env = PortfolioEnvClient(base_url=ENV_URL)
+            return env.sync()
+    except Exception:
+        pass
+
+    # Fallback: try to launch from Docker image (if IMAGE_NAME env var is set)
+    if IMAGE_NAME:
+        try:
+            env = PortfolioEnvClient.from_docker_image(IMAGE_NAME)
+            return env.sync()
+        except Exception as exc:
+            error_msg = f"Failed to launch Docker image '{IMAGE_NAME}': {exc}"
+            print(f"[ERROR] {error_msg}", flush=True)
+            raise RuntimeError(error_msg) from exc
+
+    # Both methods failed
+    error_msg = f"Failed to connect to environment server at {ENV_URL} and Docker image not available"
+    print(f"[ERROR] {error_msg}", flush=True)
+    raise RuntimeError(error_msg)
+
+
+def fetch_grader_score(env_url: str) -> Dict[str, Any]:
+    """Fetch grader score via HTTP (grader is a custom endpoint, not on WebSocket)."""
+    try:
+        resp = requests.get(f"{env_url}/grader", timeout=30)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception:
+        return {"final_score": 0.0, "pass": False}
+
+
+# ── Run one task ──────────────────────────────────────────────
+
+def run_task(task_level: int, llm_client: OpenAI, env: PortfolioEnvClient) -> Dict[str, Any]:
+    """Run one task, emit structured logs, return grader score."""
+    # Safe lookup of task name
+    task_name = TASK_NAMES.get(task_level, f"unknown-task-{task_level}")
+    thresholds = {1: 0.3, 2: 0.5, 3: 0.6}
+    task_threshold = thresholds.get(task_level, 0.5)  # Safe threshold lookup
+
+    rewards: List[float] = []
+    steps_taken = 0
+    score = 0.0
+    success = False
+
+    log_start(task=task_name, env=BENCHMARK_NAME, model=MODEL_NAME)
 
     try:
-        result      = await env.reset()
-        observation = result.observation
-        done        = result.done
+        # Reset environment for this task via WebSocket
+        try:
+            result = env.reset(task_level=task_level)
+        except Exception as exc:
+            error_msg = f"Failed to reset environment: {exc}"
+            print(f"[ERROR] {error_msg}", flush=True)
+            log_step(step=1, action="hold", reward=0.0, done=True, error=error_msg)
+            steps_taken = 1
+            rewards.append(0.0)
+            raise
 
-        # conversation history — LLM adapts within episode based on past actions
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user",   "content": observation.text_observation},
-        ]
+        # Extract observation safely
+        try:
+            observation = result.observation
+            text_obs = observation.text_observation
+            done = result.done
+        except (AttributeError, KeyError, TypeError) as exc:
+            error_msg = f"Malformed observation from environment: {exc}"
+            print(f"[ERROR] {error_msg}", flush=True)
+            log_step(step=1, action="hold", reward=0.0, done=True, error=error_msg)
+            steps_taken = 1
+            rewards.append(0.0)
+            raise RuntimeError(error_msg) from exc
 
-        step = 0
+        # Build conversation history for LLM
+        try:
+            messages = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": text_obs},
+            ]
+        except Exception as exc:
+            error_msg = f"Failed to build initial messages: {exc}"
+            print(f"[ERROR] {error_msg}", flush=True)
+            raise RuntimeError(error_msg) from exc
+
         while not done:
-            step += 1
+            steps_taken += 1
+            error_msg = None
 
-            # ── Call LLM ─────────────────────────────────────
+            # Call LLM for action
             try:
-                completion = client.chat.completions.create(
+                completion = llm_client.chat.completions.create(
                     model=MODEL_NAME,
                     messages=messages,
                     temperature=TEMPERATURE,
                     max_tokens=MAX_TOKENS,
                     stream=False,
                 )
-                response_text = completion.choices[0].message.content or ""
+                response_text = (completion.choices[0].message.content or "").strip()
                 action = parse_action(response_text)
-
             except Exception as exc:
-                print(f"  Model request failed ({exc}). Using RSI fallback.")
-                action = get_rsi_fallback_action(observation.text_observation)
+                error_msg = str(exc)
+                action = get_rsi_fallback_action(text_obs)
 
-            actions_taken[action] += 1
-
-            # ── Add to conversation history ───────────────────
-            messages.append({"role": "assistant", "content": str(action)})
-
-            # ── Step environment ──────────────────────────────
-            result      = await env.step(PortfolioAction(action=action))
-            observation = result.observation
-            done        = result.done
-
-            # ── Add result to history ─────────────────────────
-            if not done:
-                history_line = (
-                    f"Step {step}: action={action} "
-                    f"reward={result.reward:+.2f} "
-                    f"pv=₹{observation.portfolio_value:,.0f}"
+            # Step environment via WebSocket
+            try:
+                result = env.step(PortfolioAction(action=action))
+            except Exception as exc:
+                error_msg = str(exc)
+                log_step(
+                    step=steps_taken,
+                    action=get_action_label(action),
+                    reward=0.0,
+                    done=True,
+                    error=error_msg,
                 )
-                history.append(history_line)
-                messages.append({
-                    "role": "user",
-                    "content": f"Result: reward={result.reward:.2f}\n\n{observation.text_observation}"
-                })
-
-            if step % 10 == 0 or done:
-                action_str = ['HOLD', 'BUY ', 'SELL'][action]
-                print(f"  Day {observation.day_in_episode:3d} | {action_str} | "
-                      f"PV: ₹{observation.portfolio_value:>12,.2f} | "
-                      f"Return: {observation.episode_return_pct:>+7.2f}% | "
-                      f"RSI: {observation.rsi:.1f}")
-
-            if done:
-                print("Episode complete.")
+                rewards.append(0.0)
                 break
 
-        # ── Grade episode ─────────────────────────────────────
-        # fetch grader from server
-        async def fetch_grader():
-            # TODO: The /grader endpoint is currently broken. Return dummy score for now.
-            # Return dummy score (grader endpoint needs debugging)
-            return {
-                "final_score": 0.0,
-                "agent_return": observation.episode_return_pct / 100.0 if observation else 0.0,
-                "bh_return": 0.0,
-                "max_drawdown": 0.0,
-                "pass": False,
-            }
+            # Extract result fields safely
+            try:
+                observation = result.observation
+                reward = float(result.reward or 0.0)
+                done = result.done
+                text_obs = observation.text_observation
+            except (AttributeError, KeyError, TypeError, ValueError) as exc:
+                error_msg = f"Malformed step result: {exc}"
+                log_step(
+                    step=steps_taken,
+                    action=get_action_label(action),
+                    reward=0.0,
+                    done=True,
+                    error=error_msg,
+                )
+                rewards.append(0.0)
+                break
 
-        grader    = await fetch_grader()
-        threshold = [0.3, 0.5, 0.6][task_level - 1]
-        status    = "✓ PASS" if grader['final_score'] >= threshold else "✗ FAIL"
+            rewards.append(reward)
 
-        print(f"\n── TASK {task_level} RESULTS ─────────────────────────────────")
-        print(f"  Agent Return:   {grader['agent_return']:>+7.2f}%")
-        print(f"  Buy-Hold:       {grader['bh_return']:>+7.2f}%")
-        print(f"  Max Drawdown:   {grader['max_drawdown']:>7.2f}%")
-        if 'agent_sharpe' in grader:
-            print(f"  Sharpe:         {grader['agent_sharpe']:>7.4f}")
-        print(f"── FINAL SCORE: {grader['final_score']:.4f}  {status} ──")
-        print(f"  Actions: Hold={actions_taken[0]}, Buy={actions_taken[1]}, Sell={actions_taken[2]}")
+            log_step(
+                step=steps_taken,
+                action=get_action_label(action),
+                reward=reward,
+                done=done,
+                error=error_msg,
+            )
 
-        return grader
+            # Update conversation for next LLM call
+            if not done:
+                try:
+                    messages.append({"role": "assistant", "content": str(action)})
+                    messages.append({
+                        "role": "user",
+                        "content": f"Result: reward={reward:.2f}\n\n{text_obs}",
+                    })
+                except Exception as exc:
+                    error_msg = f"Failed to build next message: {exc}"
+                    print(f"[ERROR] {error_msg}", flush=True)
+                    log_step(
+                        step=steps_taken + 1,
+                        action="hold",
+                        reward=0.0,
+                        done=True,
+                        error=error_msg,
+                    )
+                    rewards.append(0.0)
+                    break
+
+        # Fetch grader score via HTTP endpoint
+        try:
+            grader = fetch_grader_score(ENV_URL)
+            score = float(grader.get("final_score", 0.0))
+            success = score >= task_threshold
+        except (KeyError, TypeError, ValueError) as exc:
+            error_msg = f"Failed to parse grader score: {exc}"
+            print(f"[ERROR] {error_msg}", flush=True)
+            score = 0.0
+            success = False
+
+    except Exception as exc:
+        # Catch-all: ensure [END] is always emitted
+        error_msg = str(exc)
+        if steps_taken == 0:
+            log_step(step=1, action="hold", reward=0.0, done=True, error=error_msg)
+            steps_taken = 1
+            rewards.append(0.0)
 
     finally:
-        try:
-            await env.close()
-        except Exception as e:
-            # Docker container stop might timeout, but episode already completed
-            print(f"  Warning: failed to close environment: {e}")
+        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
+    return {
+        "task": task_level,
+        "task_name": task_name,
+        "final_score": score,
+        "success": success,
+        "steps": steps_taken,
+    }
+
+
+# ── Main ──────────────────────────────────────────────────────
 
 async def main() -> None:
-    print("Portfolio Management RL Environment — Inference")
-    print(f"Model:  {MODEL_NAME}")
-    print(f"API:    {API_BASE_URL}")
-    print(f"Token:  {'set' if API_KEY else 'NOT SET — RSI fallback will be used'}")
+    """Run all tasks, emit structured logs, and handle errors."""
+    try:
+        # Initialize OpenAI client
+        llm_client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN or "no-key")
 
-    # Initialize OpenAI client pointed at HuggingFace router
-    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY or "no-key")
+        # Connect to the environment server (WebSocket for stateful interaction)
+        env = get_env_client()
 
-    scores = {}
-    for task in [1, 2, 3]:
-        scores[f"task_{task}"] = await run_task(task, client)
+        results = []
+        try:
+            for task_level in [1, 2, 3]:
+                result = run_task(task_level, llm_client, env)
+                results.append(result)
+        finally:
+            try:
+                env.close()
+            except Exception:
+                pass
 
-    print(f"\n{'='*60}")
-    print("BASELINE SUMMARY")
-    print(f"{'='*60}")
-    thresholds = [0.3, 0.5, 0.6]
-    for i, (task, result) in enumerate(scores.items()):
-        status = "✓ PASS" if result['final_score'] >= thresholds[i] else "✗ FAIL"
-        print(f"  {task}: {result['final_score']:.4f}  {status}")
+    except Exception as exc:
+        print(f"[FATAL] {exc}", flush=True)
 
 
 if __name__ == "__main__":

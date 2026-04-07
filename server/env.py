@@ -63,10 +63,13 @@ class PortfolioEnv:
 
     def _load_data(self) -> pd.DataFrame:
         """Load and clean CSV data"""
-        # Try different possible paths
+        # Try different possible paths (Docker, then local)
         possible_paths = [
-                Path("/app/env/data/reliance.csv"),
-            ]
+            Path("/app/env/data/reliance.csv"),
+            BASE_DIR / "data" / "reliance.csv",
+            Path(__file__).parent.parent / "data" / "reliance.csv",
+            Path("data/reliance.csv"),
+        ]
         
         df_path = None
         for path in possible_paths:

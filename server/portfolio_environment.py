@@ -30,8 +30,16 @@ class PortfolioEnvironment(Environment):
         self.task_level = task_level
 
 
-    def reset(self) -> PortfolioObservation:
-        """Reset environment and return initial observation"""
+    def reset(self, task_level: int = None) -> PortfolioObservation:
+        """Reset environment and return initial observation.
+
+        Args:
+            task_level: Optional task level (1-3). If provided, recreates the
+                        underlying environment with the new task level.
+        """
+        if task_level is not None and task_level != self.task_level:
+            self.task_level = task_level
+            self.game = PortfolioEnv(task_level=task_level, seed=42)
         self._state = State(episode_id=str(uuid4()), step_count=0)
         obs, info = self.game.reset()
         PortfolioEnvironment._active_instance = self  # Track this instance for grading
