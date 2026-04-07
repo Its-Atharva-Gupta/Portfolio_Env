@@ -1,7 +1,39 @@
+# Python
 .venv/
+venv/
+env/
 __pycache__/
-Trading_Env.zip
-script.sh
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.coverage
+dist/
+build/
+
+# IDE & Editor
+.vscode/
+.cursor/
+.idea/
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Secrets & Config
 .env
+.env.local
+.env.*.local
+
+# Project-specific (validation & documentation)
+.claude/
+transcript.txt
+Problem Statement.txt
+prevalidation.sh
+document_pdf.pdf
+checklist.txt
+Phase2.txt
+script.sh
 groq_inference.py
+Trading_Env.zip
 CLAUDE.md
