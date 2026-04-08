@@ -1,0 +1,22 @@
+EVALUATION STATUS
+
+Submission #6 (LATEST)
+7 Apr 2026, 7:20 pm
+
+https://github.com/Its-Atharva-Gupta/Portfolio_Env
+https://huggingface.co/spaces/Atharva1232/portfolio-management
+
+Phase 1: PASSED
+Phase 2: FAILED
+
+❌ PHASE 2 FAILED
+One or more task scores are out of range
+
+Phase 2 is fail-fast. The first failing check halts the pipeline — fix this issue, then push your next update from the submission flow.
+
+WHY IT FAILED
+Each task’s score must be strictly between 0 and 1 (not 0.0 and not 1.0).
+
+HOW TO FIX
+
+Update your grader(s) so each task score falls strictly within (0, 1) and resubmit.

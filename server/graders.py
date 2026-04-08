@@ -7,12 +7,12 @@ from .env import PortfolioEnv
 
 def _score_component(agent_val: float, benchmark_val: float) -> float:
     """Score agent performance vs a benchmark. Returns (0, 1) strictly."""
-    epsilon = 1e-6
+    epsilon = 1e-4
     if benchmark_val <= 0:
         score = 1.0 if agent_val > benchmark_val else max(0.0, 1.0 + agent_val)
     else:
         score = max(0.0, min(1.0, agent_val / benchmark_val))
-    # Clamp to strictly (0, 1)
+    # Clamp to strictly (0, 1) — epsilon must survive round(..., 4)
     return max(epsilon, min(1.0 - epsilon, score))
 
 
@@ -24,7 +24,7 @@ def grade_task_1(env: PortfolioEnv) -> Dict[str, Any]:
     """
     m = env._compute_episode_score()
 
-    epsilon = 1e-6
+    epsilon = 1e-4
     bh_score = _score_component(m['agent_return'], m['bh_return'])
     dd_score = max(epsilon, min(1.0 - epsilon, max(0.0, min(1.0, 1.0 - (m['max_drawdown'] / 0.30)))))
     fd_score = _score_component(m['agent_return'], m['fd_return'])
@@ -59,7 +59,7 @@ def grade_task_2(env: PortfolioEnv) -> Dict[str, Any]:
     """
     m = env._compute_episode_score()
 
-    epsilon = 1e-6
+    epsilon = 1e-4
     bh_score = _score_component(m['agent_return'], m['bh_return'])
     mom_score = _score_component(m['agent_return'], m['momentum_return'])
 
@@ -109,7 +109,7 @@ def grade_task_3(env: PortfolioEnv) -> Dict[str, Any]:
     """
     m = env._compute_episode_score()
 
-    epsilon = 1e-6
+    epsilon = 1e-4
     bh_score = _score_component(m['agent_return'], m['bh_return'])
     mom_score = _score_component(m['agent_return'], m['momentum_return'])
 
