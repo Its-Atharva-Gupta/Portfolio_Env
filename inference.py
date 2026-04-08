@@ -37,6 +37,11 @@ API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "meta-llama/Llama-3.3-70B-Instruct")
 HF_TOKEN = os.getenv("HF_TOKEN")  # No default — must be provided
 
+# Groq fallback (used when HF quota is exhausted)
+GROQ_API_KEY = os.getenv("GROQ_API_KEY") or os.getenv("API_KEY")
+GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+GROQ_MODEL_NAME = os.getenv("GROQ_MODEL_NAME", "llama-3.3-70b-versatile")
+
 # Environment server URL — the already-running HF Space or local server
 ENV_URL = os.getenv("ENV_URL", "http://localhost:8000")
 
@@ -154,7 +159,7 @@ def fetch_grader_score(env_url: str) -> Dict[str, Any]:
 
 # ── Run one task ──────────────────────────────────────────────
 
-async def run_task(task_level: int, llm_client: OpenAI, env: PortfolioEnvClient) -> Dict[str, Any]:
+async def run_task(task_level: int, llm_client: OpenAI, env: PortfolioEnvClient, groq_client: Optional[OpenAI] = None) -> Dict[str, Any]:
     """Run one task, emit structured logs, return grader score."""
     # Safe lookup of task name
     task_name = TASK_NAMES.get(task_level, f"unknown-task-{task_level}")
@@ -208,7 +213,7 @@ async def run_task(task_level: int, llm_client: OpenAI, env: PortfolioEnvClient)
             steps_taken += 1
             error_msg = None
 
-            # Call LLM for action
+            # Call LLM for action — try HF first, then Groq if HF quota exhausted
             try:
                 completion = llm_client.chat.completions.create(
                     model=MODEL_NAME,
@@ -219,9 +224,26 @@ async def run_task(task_level: int, llm_client: OpenAI, env: PortfolioEnvClient)
                 )
                 response_text = (completion.choices[0].message.content or "").strip()
                 action = parse_action(response_text)
-            except Exception as exc:
-                error_msg = str(exc)
-                action = get_rsi_fallback_action(text_obs)
+            except Exception as hf_exc:
+                hf_error = str(hf_exc)
+                if groq_client is not None:
+                    try:
+                        completion = groq_client.chat.completions.create(
+                            model=GROQ_MODEL_NAME,
+                            messages=messages,
+                            temperature=TEMPERATURE,
+                            max_tokens=MAX_TOKENS,
+                            stream=False,
+                        )
+                        response_text = (completion.choices[0].message.content or "").strip()
+                        action = parse_action(response_text)
+                        error_msg = f"HF failed ({hf_error}); used Groq"
+                    except Exception as groq_exc:
+                        error_msg = f"HF failed ({hf_error}); Groq also failed ({groq_exc})"
+                        action = FALLBACK_ACTION
+                else:
+                    error_msg = hf_error
+                    action = FALLBACK_ACTION
 
             # Step environment via WebSocket
             try:
@@ -323,22 +345,22 @@ async def run_task(task_level: int, llm_client: OpenAI, env: PortfolioEnvClient)
 async def main() -> None:
     """Run all tasks, emit structured logs, and handle errors."""
     try:
-        # Initialize OpenAI client
+        # Initialize OpenAI client (HF) and Groq fallback client
         llm_client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN or "no-key")
-
-        # Connect to the environment server (WebSocket for stateful interaction)
-        env = await get_env_client()
+        groq_client = OpenAI(base_url=GROQ_BASE_URL, api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
         results = []
-        try:
-            for task_level in [1, 2, 3]:
-                result = await run_task(task_level, llm_client, env)
-                results.append(result)
-        finally:
+        for task_level in [1, 2, 3]:
+            # Fresh connection per task to avoid WebSocket keepalive timeouts
+            env = await get_env_client()
             try:
-                await env.close()
-            except Exception:
-                pass
+                result = await run_task(task_level, llm_client, env, groq_client)
+                results.append(result)
+            finally:
+                try:
+                    await env.close()
+                except Exception:
+                    pass
 
     except Exception as exc:
         print(f"[FATAL] {exc}", flush=True)

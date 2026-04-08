@@ -38,6 +38,20 @@ app = create_app(
 # Only define what OpenEnv does NOT already provide.
 # DO NOT redefine: /reset /step /state /schema /health /metadata /ws /mcp
 
+def _to_python(obj):
+    """Recursively convert numpy scalars to Python native types for JSON serialization."""
+    import numpy as np
+    if isinstance(obj, dict):
+        return {k: _to_python(v) for k, v in obj.items()}
+    if isinstance(obj, np.bool_):
+        return bool(obj)
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.floating):
+        return float(obj)
+    return obj
+
+
 @app.get("/grader")
 def get_grader():
     """Get grader score for the current episode."""
@@ -51,7 +65,7 @@ def get_grader():
             }
 
         score = grade_episode(PortfolioEnvironment._active_instance.game)
-        return score
+        return _to_python(score)
     except Exception as e:
         return {
             "final_score": 0.0,
